@@ -41,62 +41,41 @@ def register():
         data = request.get_json()
         nickname = data.get('nickname', '').strip()
         password = data.get('password', '')
-        if not nickname or not password:
-            return jsonify({"message": "Empty fields"}), 400
-        if len(password) < 8 or not re.search(r"\d", password) or not re.search(r"[a-zA-Z]", password):
-            return jsonify({"message": "Password weak"}), 400
-        if User.query.filter_by(nickname=nickname).first():
-            return jsonify({"message": "Nickname already taken"}), 400
-        hashed_pw = generate_password_hash(password)
-        new_user = User(nickname=nickname, password=hashed_pw)
+        if not nickname or not password: return jsonify({"message": "Empty fields"}), 400
+        if User.query.filter_by(nickname=nickname).first(): return jsonify({"message": "Exists"}), 400
+        new_user = User(nickname=nickname, password=generate_password_hash(password))
         db.session.add(new_user)
         db.session.commit()
         return jsonify({"message": "Success"}), 201
-    except Exception as e:
-        return jsonify({"message": "Server error"}), 500
+    except: return jsonify({"message": "Error"}), 500
 
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
     user = User.query.filter_by(nickname=data.get('nickname')).first()
     if user and check_password_hash(user.password, data.get('password')):
-        token = jwt.encode({
-            'id': user.id, 
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-        }, app.config['SECRET_KEY'], algorithm='HS256')
+        token = jwt.encode({'id': user.id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)}, app.config['SECRET_KEY'])
         return jsonify({"token": token})
-    return jsonify({"message": "Invalid nickname or password"}), 401
+    return jsonify({"message": "Invalid"}), 401
 
-# --- 核心修改：支持 GET 获取和 POST 上传 ---
+# --- 核心修改：修复 UndefinedTable 错误 ---
 @app.route('/posts', methods=['GET', 'POST'])
 def handle_posts():
-    # 1. 上传数据 (解决 Postman 405 错误)
+    # 强制在每次请求前检查表是否存在（解决 Render 部署不刷新的问题）
+    db.create_all() 
+
     if request.method == 'POST':
         data = request.get_json()
-        try:
-            new_post = Post(
-                username=data.get('username'),
-                caption=data.get('caption'),
-                postImage=data.get('postImage')
-            )
-            db.session.add(new_post)
-            db.session.commit()
-            return jsonify({"message": "Post created successfully!"}), 201
-        except Exception as e:
-            return jsonify({"message": str(e)}), 400
+        new_post = Post(
+            username=data.get('username'),
+            caption=data.get('caption'),
+            postImage=data.get('postImage')
+        )
+        db.session.add(new_post)
+        db.session.commit()
+        return jsonify({"message": "Post created successfully!"}), 201
 
-    # 2. 获取数据 (让 Android 端看到真实数据)
     posts = Post.query.all()
-    # 如果数据库没数据，先给两个假数据兜底，防止 Android 端一片空白
-    if not posts:
-        return jsonify([
-            {
-                "username": "Xiao_Man",
-                "caption": "Database is empty, showing sample!",
-                "postImage": "https://picsum.photos/800/800?random=1"
-            }
-        ])
-    
     return jsonify([{
         "username": p.username,
         "caption": p.caption,
