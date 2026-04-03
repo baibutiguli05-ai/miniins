@@ -1,69 +1,71 @@
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash # 导入加密工具
 import jwt
 import datetime
 import os
+import re # 导入正则表达式用于校验
 
 app = Flask(__name__)
 
-# 1. 替换为你的 PostgreSQL 连接字符串
-# 注意：Render 的外部连接通常需要加上 sslmode=require
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://miniins_db_user:eSLhBtucYXILPrnDmJZYuNRlaT5U93EN@dpg-d77urihr0fns738bc7gg-a.oregon-postgres.render.com/miniins_db?sslmode=require'
-
-# 建议：如果以后想更安全，可以改用环境变量：
-# app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL').replace("postgres://", "postgresql://", 1)
-
+# 数据库配置（保持你之前的环境变量读取逻辑）
+uri = os.getenv("DATABASE_URL")
+if uri and uri.startswith("postgres://"):
+    uri = uri.replace("postgres://", "postgresql://", 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = uri or 'sqlite:///users.db'
 app.config['SECRET_KEY'] = 'secret123'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# 定义用户模型
 class User(db.Model):
-    __tablename__ = 'users' # 明确指定表名
+    __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     nickname = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(80), nullable=False)
-
-# 在程序启动时创建表（如果表不存在）
-with app.app_context():
-    db.create_all()
+    password = db.Column(db.String(255), nullable=False) # 哈希后的密码较长，建议设为255
 
 @app.route('/register', methods=['POST'])
 def register():
-    try:
-        data = request.get_json()
-        # 检查用户是否已存在
-        if User.query.filter_by(nickname=data['nickname']).first():
-            return jsonify({"message": "User already exists"}), 400
-            
-        new_user = User(nickname=data['nickname'], password=data['password'])
-        db.session.add(new_user)
-        db.session.commit()
-        return jsonify({"message": "Success"}), 201
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
+    data = request.get_json()
+    nickname = data.get('nickname')
+    password = data.get('password')
+
+    # --- 密码强度校验逻辑 ---
+    # 条件：至少8位，包含字母和数字
+    if len(password) < 8:
+        return jsonify({"message": "Password must be at least 8 characters"}), 400
+    if not re.search(r"[a-zA-Z]", password) or not re.search(r"[0-9]", password):
+        return jsonify({"message": "Password must contain both letters and numbers"}), 400
+
+    # 检查用户是否存在
+    if User.query.filter_by(nickname=nickname).first():
+        return jsonify({"message": "User already exists"}), 400
+
+    # --- 哈希加密 ---
+    hashed_pw = generate_password_hash(password, method='pbkdf2:sha256')
+    
+    new_user = User(nickname=nickname, password=hashed_pw)
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({"message": "Success"}), 201
 
 @app.route('/login', methods=['POST'])
 def login():
-    try:
-        data = request.get_json()
-        user = User.query.filter_by(nickname=data['nickname'], password=data['password']).first()
-        
-        if user:
-            # 生成 Token
-            payload = {
-                'id': user.id,
-                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-            }
-            token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
-            return jsonify({"token": token})
-            
-        return jsonify({"message": "Invalid nickname or password"}), 401
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
+    data = request.get_json()
+    user = User.query.filter_by(nickname=data.get('nickname')).first()
+
+    # --- 校验哈希密码 ---
+    # 不能用 == 判断，必须用 check_password_hash
+    if user and check_password_hash(user.password, data.get('password')):
+        token = jwt.encode({
+            'id': user.id, 
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }, app.config['SECRET_KEY'], algorithm='HS256')
+        return jsonify({"token": token})
+    
+    return jsonify({"message": "Invalid credentials"}), 401
 
 if __name__ == '__main__':
-    # 这里的端口会根据环境自动调整
+    with app.app_context():
+        db.create_all()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
