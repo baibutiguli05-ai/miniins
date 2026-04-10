@@ -37,9 +37,10 @@ class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), nullable=False)
     caption = db.Column(db.String(255))
-    postImage = db.Column(db.String(500)) 
+    # 注意：存储多张图片的 URL，用逗号分隔，如 "url1,url2,url3"
+    postImage = db.Column(db.Text) 
 
-# --- 静态资源路由 (解决图片感叹号问题) ---
+# --- 静态资源路由 ---
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
@@ -80,43 +81,47 @@ def handle_posts():
     db.create_all() 
 
     if request.method == 'POST':
-        # 兼容性处理：支持 JSON 和 Multipart (解决 415 错误)
         if request.is_json:
             data = request.get_json()
             username = data.get('username')
             caption = data.get('caption')
-            image_url = data.get('postImage') or data.get('image')
+            image_url_str = data.get('postImage') or data.get('image')
         else:
-            # 获取 Android 发送的用户名 (解决匿名者问题)
+            # 1. 获取 Android 传入的基本信息
             username = request.form.get('username', 'Anonymous')
             caption = request.form.get('caption', '')
-            file = request.files.get('image')
             
-            if file:
-                filename = secure_filename(f"{datetime.datetime.now().timestamp()}_{file.filename}")
-                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-                # 拼凑完整 URL (解决加载失败问题)
-                image_url = f"{request.host_url}uploads/{filename}"
-            else:
-                image_url = ""
+            # 2. 核心修改：使用 getlist 获取多张图片
+            files = request.files.getlist('images') 
+            image_urls = []
+
+            for file in files:
+                if file and file.filename != '':
+                    # 生成唯一文件名
+                    filename = secure_filename(f"{datetime.datetime.now().timestamp()}_{file.filename}")
+                    file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                    # 记录完整 URL
+                    image_urls.append(f"{request.host_url}uploads/{filename}")
+            
+            # 3. 将 URL 列表转换为逗号分隔的字符串
+            image_url_str = ",".join(image_urls)
 
         new_post = Post(
             username=username,
             caption=caption,
-            postImage=image_url
+            postImage=image_url_str
         )
         db.session.add(new_post)
         db.session.commit()
-        return jsonify({"message": "Post created successfully!"}), 201
+        return jsonify({"message": "Post created successfully!", "images": image_urls if not request.is_json else image_url_str}), 201
 
-    # --- 关键修改：实现倒序显示 ---
-    # 使用 .order_by(Post.id.desc()) 让最新的 ID 排在最前面
+    # --- 查询逻辑：最新的在最上面 ---
     posts = Post.query.order_by(Post.id.desc()).all()
     
     return jsonify([{
         "username": p.username,
         "caption": p.caption,
-        "postImage": p.postImage
+        "postImage": p.postImage # Android 收到后需要按逗号 split(',') 得到列表
     } for p in posts])
 
 if __name__ == '__main__':
