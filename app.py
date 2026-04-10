@@ -4,7 +4,6 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import datetime
 import os
-import re
 
 app = Flask(__name__)
 
@@ -41,35 +40,55 @@ def register():
         data = request.get_json()
         nickname = data.get('nickname', '').strip()
         password = data.get('password', '')
-        if not nickname or not password: return jsonify({"message": "Empty fields"}), 400
-        if User.query.filter_by(nickname=nickname).first(): return jsonify({"message": "Exists"}), 400
+        if not nickname or not password: 
+            return jsonify({"message": "Empty fields"}), 400
+        if User.query.filter_by(nickname=nickname).first(): 
+            return jsonify({"message": "Exists"}), 400
         new_user = User(nickname=nickname, password=generate_password_hash(password))
         db.session.add(new_user)
         db.session.commit()
         return jsonify({"message": "Success"}), 201
-    except: return jsonify({"message": "Error"}), 500
+    except: 
+        return jsonify({"message": "Error"}), 500
 
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
     user = User.query.filter_by(nickname=data.get('nickname')).first()
     if user and check_password_hash(user.password, data.get('password')):
-        token = jwt.encode({'id': user.id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)}, app.config['SECRET_KEY'])
+        token = jwt.encode({
+            'id': user.id, 
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }, app.config['SECRET_KEY'], algorithm="HS256")
         return jsonify({"token": token})
     return jsonify({"message": "Invalid"}), 401
 
-# --- 核心修改：修复 UndefinedTable 错误 ---
 @app.route('/posts', methods=['GET', 'POST'])
 def handle_posts():
-    # 强制在每次请求前检查表是否存在（解决 Render 部署不刷新的问题）
     db.create_all() 
 
     if request.method == 'POST':
-        data = request.get_json()
+        # 兼容性处理：优先尝试从 form-data 获取，如果没有则尝试从 JSON 获取
+        if request.is_json:
+            data = request.get_json()
+            username = data.get('username')
+            caption = data.get('caption')
+            image_val = data.get('postImage') or data.get('image')
+        else:
+            # 处理 Postman 的 form-data
+            username = request.form.get('username', 'Anonymous')
+            caption = request.form.get('caption')
+            # 如果有文件上传，这里可以处理保存文件的逻辑，现在暂存文件名或占位符
+            image_file = request.files.get('image') or request.files.get('postImage')
+            image_val = image_file.filename if image_file else "default.jpg"
+
+        if not username:
+            return jsonify({"message": "Username is required"}), 400
+
         new_post = Post(
-            username=data.get('username'),
-            caption=data.get('caption'),
-            postImage=data.get('postImage')
+            username=username,
+            caption=caption,
+            postImage=image_val
         )
         db.session.add(new_post)
         db.session.commit()
