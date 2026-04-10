@@ -9,11 +9,11 @@ import os
 app = Flask(__name__)
 
 # --- 配置部分 ---
-# 创建上传文件夹
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
+# 数据库连接处理 (解决 Render 部署兼容性)
 uri = os.getenv("DATABASE_URL")
 if uri and uri.startswith("postgres://"):
     uri = uri.replace("postgres://", "postgresql://", 1)
@@ -39,12 +39,13 @@ class Post(db.Model):
     caption = db.Column(db.String(255))
     postImage = db.Column(db.String(500)) 
 
-# --- 静态资源路由 (解决图片加载感叹号问题) ---
+# --- 静态资源路由 (解决图片感叹号问题) ---
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 # --- 逻辑接口 ---
+
 @app.route('/register', methods=['POST'])
 def register():
     try:
@@ -79,14 +80,14 @@ def handle_posts():
     db.create_all() 
 
     if request.method == 'POST':
-        # 兼容性处理
+        # 兼容性处理：支持 JSON 和 Multipart (解决 415 错误)
         if request.is_json:
             data = request.get_json()
             username = data.get('username')
             caption = data.get('caption')
-            image_url = data.get('postImage') # JSON模式通常传URL
+            image_url = data.get('postImage') or data.get('image')
         else:
-            # 处理真正的文件上传
+            # 获取 Android 发送的用户名 (解决匿名者问题)
             username = request.form.get('username', 'Anonymous')
             caption = request.form.get('caption', '')
             file = request.files.get('image')
@@ -94,8 +95,7 @@ def handle_posts():
             if file:
                 filename = secure_filename(f"{datetime.datetime.now().timestamp()}_{file.filename}")
                 file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-                # 拼凑出App可以直接访问的完整URL
-                # 这里的域名请替换为你Render的实际域名
+                # 拼凑完整 URL (解决加载失败问题)
                 image_url = f"{request.host_url}uploads/{filename}"
             else:
                 image_url = ""
@@ -109,8 +109,10 @@ def handle_posts():
         db.session.commit()
         return jsonify({"message": "Post created successfully!"}), 201
 
-    # GET 请求：返回列表
+    # --- 关键修改：实现倒序显示 ---
+    # 使用 .order_by(Post.id.desc()) 让最新的 ID 排在最前面
     posts = Post.query.order_by(Post.id.desc()).all()
+    
     return jsonify([{
         "username": p.username,
         "caption": p.caption,
