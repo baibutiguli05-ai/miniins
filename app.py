@@ -41,6 +41,22 @@ class Post(db.Model):
     comments = db.relationship('Comment', backref='post', lazy=True, cascade="all, delete-orphan")
     likes = db.relationship('Like', backref='post', lazy=True, cascade="all, delete-orphan")
 
+    def to_dict(self, current_user=None):
+        """封装一个通用的转换方法"""
+        is_liked = False
+        if current_user:
+            is_liked = any(like.username == current_user for like in self.likes)
+        
+        return {
+            "id": self.id, 
+            "username": self.username,
+            "caption": self.caption,
+            "postImage": self.postImage,
+            "likes_count": self.likes_count,
+            "is_liked": is_liked,
+            "comments": [{"username": c.username, "content": c.content} for c in self.comments]
+        }
+
 class Comment(db.Model):
     __tablename__ = 'comments'
     id = db.Column(db.Integer, primary_key=True)
@@ -59,6 +75,34 @@ class Like(db.Model):
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+# 1. 获取所有帖子 (首页流)
+@app.route('/posts', methods=['GET'])
+def get_posts():
+    current_user = request.args.get('username')
+    posts = Post.query.order_by(Post.id.desc()).all()
+    return jsonify([p.to_dict(current_user) for p in posts])
+
+# 2. 获取特定用户发布的帖子 (个人主页-我的发布)
+@app.route('/posts/me', methods=['GET'])
+def get_my_posts():
+    target_username = request.args.get('username') # 想要查询谁的
+    if not target_username:
+        return jsonify({"message": "Username is required"}), 400
+    
+    posts = Post.query.filter_by(username=target_username).order_by(Post.id.desc()).all()
+    return jsonify([p.to_dict(target_username) for p in posts])
+
+# 3. 获取用户点赞过的帖子 (个人主页-我的点赞)
+@app.route('/posts/liked', methods=['GET'])
+def get_liked_posts():
+    username = request.args.get('username')
+    if not username:
+        return jsonify({"message": "Username is required"}), 400
+
+    # 通过关联查询找到该用户点赞过的所有 Post
+    posts = Post.query.join(Like).filter(Like.username == username).order_by(Post.id.desc()).all()
+    return jsonify([p.to_dict(username) for p in posts])
 
 @app.route('/upload_multiple', methods=['POST'])
 def upload_multiple():
@@ -86,30 +130,6 @@ def upload_multiple():
         return jsonify({"message": "success", "urls": image_urls}), 201
     except Exception as e:
         return jsonify({"message": str(e)}), 500
-
-@app.route('/posts', methods=['GET'])
-def get_posts():
-    # 获取当前查询的用户名，用于判断点赞状态
-    current_user = request.args.get('username')
-    posts = Post.query.order_by(Post.id.desc()).all()
-    
-    output = []
-    for p in posts:
-        # 判断当前用户是否在点赞列表中
-        is_liked = False
-        if current_user:
-            is_liked = any(like.username == current_user for like in p.likes)
-
-        output.append({
-            "id": p.id, 
-            "username": p.username,
-            "caption": p.caption,
-            "postImage": p.postImage,
-            "likes_count": p.likes_count,
-            "is_liked": is_liked,  # 新增：告诉前端是否已点赞
-            "comments": [{"username": c.username, "content": c.content} for c in p.comments] if p.comments else []
-        })
-    return jsonify(output)
 
 @app.route('/posts/<int:post_id>/comments', methods=['POST'])
 def add_comment(post_id):
@@ -162,7 +182,7 @@ def toggle_like(post_id):
         return jsonify({
             "message": message, 
             "likes_count": post.likes_count,
-            "is_liked": is_liked # 返回最新状态
+            "is_liked": is_liked 
         }), 200
     except Exception as e:
         db.session.rollback()
