@@ -13,7 +13,7 @@ UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-# 数据库连接处理 (解决 Render 部署兼容性)
+# 数据库连接处理
 uri = os.getenv("DATABASE_URL")
 if uri and uri.startswith("postgres://"):
     uri = uri.replace("postgres://", "postgresql://", 1)
@@ -38,8 +38,9 @@ class Post(db.Model):
     username = db.Column(db.String(80), nullable=False)
     caption = db.Column(db.String(255))
     postImage = db.Column(db.Text) 
-    # 建立与评论的关联
+    likes_count = db.Column(db.Integer, default=0) # 新增：点赞总数字段
     comments = db.relationship('Comment', backref='post', lazy=True)
+    likes = db.relationship('Like', backref='post', lazy=True) # 建立与点赞表的关联
 
 class Comment(db.Model):
     __tablename__ = 'comments'
@@ -47,6 +48,13 @@ class Comment(db.Model):
     post_id = db.Column(db.Integer, db.ForeignKey('posts.id'), nullable=False)
     username = db.Column(db.String(80), nullable=False)
     content = db.Column(db.Text, nullable=False)
+
+# 新增：点赞模型，用于记录点赞历史
+class Like(db.Model):
+    __tablename__ = 'likes'
+    id = db.Column(db.Integer, primary_key=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('posts.id'), nullable=False)
+    username = db.Column(db.String(80), nullable=False) # 记录是谁点赞的
 
 # --- 静态资源路由 ---
 @app.route('/uploads/<filename>')
@@ -82,19 +90,20 @@ def upload_multiple():
         print(f"Error: {str(e)}")
         return jsonify({"message": str(e)}), 500
 
-# --- 查询所有帖子 (修复了 ID 丢失问题) ---
+# --- 查询所有帖子 ---
 @app.route('/posts', methods=['GET'])
 def get_posts():
     posts = Post.query.order_by(Post.id.desc()).all()
     return jsonify([{
-        "id": p.id,  # 关键：返回 ID 供 Android 使用
+        "id": p.id, 
         "username": p.username,
         "caption": p.caption,
         "postImage": p.postImage,
+        "likes_count": p.likes_count, # 返回点赞数
         "comments": [{"username": c.username, "content": c.content} for c in p.comments]
     } for p in posts])
 
-# --- 新增：发表评论接口 (修复 404) ---
+# --- 发表评论接口 ---
 @app.route('/posts/<int:post_id>/comments', methods=['POST'])
 def add_comment(post_id):
     try:
@@ -105,7 +114,6 @@ def add_comment(post_id):
         if not content:
             return jsonify({"message": "Content is empty"}), 400
 
-        # 检查帖子是否存在
         post = Post.query.get(post_id)
         if not post:
             return jsonify({"message": "Post not found"}), 404
@@ -118,11 +126,41 @@ def add_comment(post_id):
     except Exception as e:
         return jsonify({"message": str(e)}), 500
 
-# --- 新增：点赞接口 (修复 404) ---
+# --- 完善后的点赞接口 ---
 @app.route('/posts/<int:post_id>/like', methods=['POST'])
 def toggle_like(post_id):
-    # 此处逻辑可根据需要完善，目前先返回成功
-    return jsonify({"message": "Like updated"}), 200
+    try:
+        data = request.get_json()
+        username = data.get('username', 'Anonymous')
+
+        post = Post.query.get(post_id)
+        if not post:
+            return jsonify({"message": "Post not found"}), 404
+
+        # 检查该用户是否已经点过赞
+        existing_like = Like.query.filter_by(post_id=post_id, username=username).first()
+
+        if existing_like:
+            # 如果点过，则取消点赞
+            db.session.delete(existing_like)
+            post.likes_count = max(0, post.likes_count - 1)
+            message = "Unliked"
+        else:
+            # 如果没点过，新增记录
+            new_like = Like(post_id=post_id, username=username)
+            db.session.add(new_like)
+            post.likes_count += 1
+            message = "Liked"
+
+        db.session.commit() # 关键：提交到数据库
+        
+        # 返回 JSON 格式的点赞总数给 Android 解析
+        return jsonify({
+            "message": message, 
+            "likes_count": post.likes_count
+        }), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
 
 # --- 用户认证接口 ---
 @app.route('/register', methods=['POST'])
@@ -151,7 +189,7 @@ def login():
             'id': user.id, 
             'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
         }, app.config['SECRET_KEY'], algorithm="HS256")
-        return jsonify({"token": token})
+        return jsonify({"token": token, "username": user.nickname})
     return jsonify({"message": "Invalid"}), 401
 
 if __name__ == '__main__':
