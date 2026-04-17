@@ -13,7 +13,6 @@ UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-# 数据库连接处理
 uri = os.getenv("DATABASE_URL")
 if uri and uri.startswith("postgres://"):
     uri = uri.replace("postgres://", "postgresql://", 1)
@@ -38,9 +37,9 @@ class Post(db.Model):
     username = db.Column(db.String(80), nullable=False)
     caption = db.Column(db.String(255))
     postImage = db.Column(db.Text) 
-    likes_count = db.Column(db.Integer, default=0) # 新增：点赞总数字段
-    comments = db.relationship('Comment', backref='post', lazy=True)
-    likes = db.relationship('Like', backref='post', lazy=True) # 建立与点赞表的关联
+    likes_count = db.Column(db.Integer, default=0)
+    comments = db.relationship('Comment', backref='post', lazy=True, cascade="all, delete-orphan")
+    likes = db.relationship('Like', backref='post', lazy=True, cascade="all, delete-orphan")
 
 class Comment(db.Model):
     __tablename__ = 'comments'
@@ -49,19 +48,18 @@ class Comment(db.Model):
     username = db.Column(db.String(80), nullable=False)
     content = db.Column(db.Text, nullable=False)
 
-# 新增：点赞模型，用于记录点赞历史
 class Like(db.Model):
     __tablename__ = 'likes'
     id = db.Column(db.Integer, primary_key=True)
     post_id = db.Column(db.Integer, db.ForeignKey('posts.id'), nullable=False)
-    username = db.Column(db.String(80), nullable=False) # 记录是谁点赞的
+    username = db.Column(db.String(80), nullable=False)
 
-# --- 静态资源路由 ---
+# --- 路由接口 ---
+
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# --- 核心接口：多图上传 ---
 @app.route('/upload_multiple', methods=['POST'])
 def upload_multiple():
     try:
@@ -87,23 +85,32 @@ def upload_multiple():
         
         return jsonify({"message": "success", "urls": image_urls}), 201
     except Exception as e:
-        print(f"Error: {str(e)}")
         return jsonify({"message": str(e)}), 500
 
-# --- 查询所有帖子 ---
 @app.route('/posts', methods=['GET'])
 def get_posts():
+    # 获取当前查询的用户名，用于判断点赞状态
+    current_user = request.args.get('username')
     posts = Post.query.order_by(Post.id.desc()).all()
-    return jsonify([{
-        "id": p.id, 
-        "username": p.username,
-        "caption": p.caption,
-        "postImage": p.postImage,
-        "likes_count": p.likes_count, # 返回点赞数
-        "comments": [{"username": c.username, "content": c.content} for c in p.comments]
-    } for p in posts])
+    
+    output = []
+    for p in posts:
+        # 判断当前用户是否在点赞列表中
+        is_liked = False
+        if current_user:
+            is_liked = any(like.username == current_user for like in p.likes)
 
-# --- 发表评论接口 ---
+        output.append({
+            "id": p.id, 
+            "username": p.username,
+            "caption": p.caption,
+            "postImage": p.postImage,
+            "likes_count": p.likes_count,
+            "is_liked": is_liked,  # 新增：告诉前端是否已点赞
+            "comments": [{"username": c.username, "content": c.content} for c in p.comments] if p.comments else []
+        })
+    return jsonify(output)
+
 @app.route('/posts/<int:post_id>/comments', methods=['POST'])
 def add_comment(post_id):
     try:
@@ -126,7 +133,6 @@ def add_comment(post_id):
     except Exception as e:
         return jsonify({"message": str(e)}), 500
 
-# --- 完善后的点赞接口 ---
 @app.route('/posts/<int:post_id>/like', methods=['POST'])
 def toggle_like(post_id):
     try:
@@ -137,32 +143,31 @@ def toggle_like(post_id):
         if not post:
             return jsonify({"message": "Post not found"}), 404
 
-        # 检查该用户是否已经点过赞
         existing_like = Like.query.filter_by(post_id=post_id, username=username).first()
 
         if existing_like:
-            # 如果点过，则取消点赞
             db.session.delete(existing_like)
             post.likes_count = max(0, post.likes_count - 1)
             message = "Unliked"
+            is_liked = False
         else:
-            # 如果没点过，新增记录
             new_like = Like(post_id=post_id, username=username)
             db.session.add(new_like)
             post.likes_count += 1
             message = "Liked"
+            is_liked = True
 
-        db.session.commit() # 关键：提交到数据库
+        db.session.commit()
         
-        # 返回 JSON 格式的点赞总数给 Android 解析
         return jsonify({
             "message": message, 
-            "likes_count": post.likes_count
+            "likes_count": post.likes_count,
+            "is_liked": is_liked # 返回最新状态
         }), 200
     except Exception as e:
+        db.session.rollback()
         return jsonify({"message": str(e)}), 500
 
-# --- 用户认证接口 ---
 @app.route('/register', methods=['POST'])
 def register():
     try:
@@ -187,7 +192,7 @@ def login():
     if user and check_password_hash(user.password, data.get('password')):
         token = jwt.encode({
             'id': user.id, 
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+            'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)
         }, app.config['SECRET_KEY'], algorithm="HS256")
         return jsonify({"token": token, "username": user.nickname})
     return jsonify({"message": "Invalid"}), 401
