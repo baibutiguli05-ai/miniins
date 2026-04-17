@@ -38,19 +38,25 @@ class Post(db.Model):
     username = db.Column(db.String(80), nullable=False)
     caption = db.Column(db.String(255))
     postImage = db.Column(db.Text) 
+    # 建立与评论的关联
+    comments = db.relationship('Comment', backref='post', lazy=True)
+
+class Comment(db.Model):
+    __tablename__ = 'comments'
+    id = db.Column(db.Integer, primary_key=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('posts.id'), nullable=False)
+    username = db.Column(db.String(80), nullable=False)
+    content = db.Column(db.Text, nullable=False)
 
 # --- 静态资源路由 ---
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# --- 核心修改：新增多图上传专门接口 ---
-# 解决 image_5e39be.png 报错：Android 端请求的是这个路径
+# --- 核心接口：多图上传 ---
 @app.route('/upload_multiple', methods=['POST'])
 def upload_multiple():
     try:
-        # 1. 获取 Android 传入的信息
-        # 注意：这里的 key 'images' 必须与 Android 端 MultipartBody.Part 一致
         files = request.files.getlist('images') 
         caption = request.form.get('caption', '')
         username = request.form.get('username', 'Anonymous')
@@ -63,10 +69,8 @@ def upload_multiple():
             if file and file.filename != '':
                 filename = secure_filename(f"{datetime.datetime.now().timestamp()}_{file.filename}")
                 file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-                # 使用 host_url 确保返回完整可访问路径
                 image_urls.append(f"{request.host_url}uploads/{filename}")
         
-        # 2. 将 URL 列表存入数据库，逗号分隔
         image_url_str = ",".join(image_urls)
         new_post = Post(username=username, caption=caption, postImage=image_url_str)
         
@@ -78,18 +82,49 @@ def upload_multiple():
         print(f"Error: {str(e)}")
         return jsonify({"message": str(e)}), 500
 
-# --- 原有查询接口 ---
+# --- 查询所有帖子 (修复了 ID 丢失问题) ---
 @app.route('/posts', methods=['GET'])
 def get_posts():
-    # 最新的帖子排在最上面
     posts = Post.query.order_by(Post.id.desc()).all()
     return jsonify([{
+        "id": p.id,  # 关键：返回 ID 供 Android 使用
         "username": p.username,
         "caption": p.caption,
-        "postImage": p.postImage # Android 收到后通过 getImageList() 解析
+        "postImage": p.postImage,
+        "comments": [{"username": c.username, "content": c.content} for c in p.comments]
     } for p in posts])
 
-# --- 其它原有接口 (Login/Register) ---
+# --- 新增：发表评论接口 (修复 404) ---
+@app.route('/posts/<int:post_id>/comments', methods=['POST'])
+def add_comment(post_id):
+    try:
+        data = request.get_json()
+        username = data.get('username', 'Anonymous')
+        content = data.get('content')
+
+        if not content:
+            return jsonify({"message": "Content is empty"}), 400
+
+        # 检查帖子是否存在
+        post = Post.query.get(post_id)
+        if not post:
+            return jsonify({"message": "Post not found"}), 404
+
+        new_comment = Comment(post_id=post_id, username=username, content=content)
+        db.session.add(new_comment)
+        db.session.commit()
+
+        return jsonify({"message": "Comment added"}), 201
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+
+# --- 新增：点赞接口 (修复 404) ---
+@app.route('/posts/<int:post_id>/like', methods=['POST'])
+def toggle_like(post_id):
+    # 此处逻辑可根据需要完善，目前先返回成功
+    return jsonify({"message": "Like updated"}), 200
+
+# --- 用户认证接口 ---
 @app.route('/register', methods=['POST'])
 def register():
     try:
