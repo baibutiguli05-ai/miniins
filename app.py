@@ -38,6 +38,7 @@ class Post(db.Model):
     username = db.Column(db.String(80), nullable=False)
     caption = db.Column(db.String(255))
     postImage = db.Column(db.Text) 
+    link_url = db.Column(db.Text)  # <--- 新增：保存广告跳转的真实网址
     likes_count = db.Column(db.Integer, default=0)
     comments = db.relationship('Comment', backref='post', lazy=True, cascade="all, delete-orphan")
     likes = db.relationship('Like', backref='post', lazy=True, cascade="all, delete-orphan")
@@ -52,6 +53,7 @@ class Post(db.Model):
             "username": self.username,
             "caption": self.caption,
             "postImage": self.postImage,
+            "link_url": self.link_url, # <--- 返回给 App，App 判断此项不为空则可点击
             "likes_count": self.likes_count,
             "is_liked": is_liked,
             "comments": [{"username": c.username, "content": c.content} for c in self.comments]
@@ -108,6 +110,8 @@ def upload_multiple():
         files = request.files.getlist('images') 
         caption = request.form.get('caption', '')
         username = request.form.get('username', 'Anonymous')
+        link_url = request.form.get('link_url', '') # <--- 从请求中获取网址
+
         if not files:
             return jsonify({"message": "No images provided"}), 400
 
@@ -119,32 +123,29 @@ def upload_multiple():
                 image_urls.append(f"{request.host_url}uploads/{filename}")
         
         image_url_str = ",".join(image_urls)
-        new_post = Post(username=username, caption=caption, postImage=image_url_str)
+        # 创建帖子时存入 link_url
+        new_post = Post(username=username, caption=caption, postImage=image_url_str, link_url=link_url)
         db.session.add(new_post)
         db.session.commit()
         return jsonify({"message": "success", "urls": image_urls}), 201
     except Exception as e:
         return jsonify({"message": str(e)}), 500
 
+# --- 其余接口代码 (Comment, Like, Register, Login) 保持不变 ---
 @app.route('/posts/<int:post_id>/comments', methods=['POST'])
 def add_comment(post_id):
     try:
         data = request.get_json()
         username = data.get('username', 'Anonymous')
         content = data.get('content')
-        if not content:
-            return jsonify({"message": "Content is empty"}), 400
-
+        if not content: return jsonify({"message": "Content is empty"}), 400
         post = Post.query.get(post_id)
-        if not post:
-            return jsonify({"message": "Post not found"}), 404
-
+        if not post: return jsonify({"message": "Post not found"}), 404
         new_comment = Comment(post_id=post_id, username=username, content=content)
         db.session.add(new_comment)
         db.session.commit()
         return jsonify({"message": "Comment added"}), 201
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
+    except Exception as e: return jsonify({"message": str(e)}), 500
 
 @app.route('/posts/<int:post_id>/like', methods=['POST'])
 def toggle_like(post_id):
@@ -152,9 +153,7 @@ def toggle_like(post_id):
         data = request.get_json()
         username = data.get('username', 'Anonymous')
         post = Post.query.get(post_id)
-        if not post:
-            return jsonify({"message": "Post not found"}), 404
-
+        if not post: return jsonify({"message": "Post not found"}), 404
         existing_like = Like.query.filter_by(post_id=post_id, username=username).first()
         if existing_like:
             db.session.delete(existing_like)
@@ -165,7 +164,6 @@ def toggle_like(post_id):
             db.session.add(new_like)
             post.likes_count += 1
             message, is_liked = "Liked", True
-
         db.session.commit()
         return jsonify({"message": message, "likes_count": post.likes_count, "is_liked": is_liked}), 200
     except Exception as e:
@@ -178,16 +176,13 @@ def register():
         data = request.get_json()
         nickname = data.get('nickname', '').strip()
         password = data.get('password', '')
-        if not nickname or not password: 
-            return jsonify({"message": "Empty fields"}), 400
-        if User.query.filter_by(nickname=nickname).first(): 
-            return jsonify({"message": "Exists"}), 400
+        if not nickname or not password: return jsonify({"message": "Empty fields"}), 400
+        if User.query.filter_by(nickname=nickname).first(): return jsonify({"message": "Exists"}), 400
         new_user = User(nickname=nickname, password=generate_password_hash(password))
         db.session.add(new_user)
         db.session.commit()
         return jsonify({"message": "Success"}), 201
-    except: 
-        return jsonify({"message": "Error"}), 500
+    except: return jsonify({"message": "Error"}), 500
 
 @app.route('/login', methods=['POST'])
 def login():
