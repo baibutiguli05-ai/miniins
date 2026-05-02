@@ -1,8 +1,6 @@
+
 flask
 flask-sqlalchemy
 pyjwt
 psycopg2-binary
 gunicorn
-flask-socketio
-eventlet
-flask-cors
